@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "omamouze",
+  "name": "OmaMouze",
+  "version": "1.0.0",
+  "author": "sierra",
+  "license": "MIT",
+  "description": "Mouse controls: DPI, device auto-detection, button action assignments, cursor size, and scroll speed.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaMouze",
+    "description": "Mouse controls & configuration",
+    "category": "Settings",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""OmaMouze controller: hardware detection, DPI, buttons, cursor size, and scroll speed."""
+import sys
+import os
+import json
+import re
+import subprocess
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config" / "omamouze"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+STATE_DIR = Path.home() / ".local" / "state" / "omamouze"
+BINDINGS_LUA = STATE_DIR / "bindings.lua"
+LOOKNFEEL_LUA = Path.home() / ".config" / "hypr" / "looknfeel.lua"
+
+PRESET_ACTIONS = [
+    # Navigation
+    {"category": "Navigation", "id": "nav_back", "label": "Browser Back", "cmd": "wtype -M alt -k Left -m alt"},
+    {"category": "Navigation", "id": "nav_fwd", "label": "Browser Forward", "cmd": "wtype -M alt -k Right -m alt"},
+    {"category": "Navigation", "id": "nav_reload", "label": "Reload Page", "cmd": "wtype -M ctrl -k r -m ctrl"},
+    {"category": "Navigation", "id": "nav_tab_next", "label": "Next Tab", "cmd": "wtype -M ctrl -k Tab -m ctrl"},
+    {"category": "Navigation", "id": "nav_tab_prev", "label": "Previous Tab", "cmd": "wtype -M ctrl -M shift -k Tab -m shift -m ctrl"},
+    {"category": "Navigation", "id": "nav_tab_new", "label": "New Tab", "cmd": "wtype -M ctrl -k t -m ctrl"},
+    {"category": "Navigation", "id": "nav_tab_close", "label": "Close Tab", "cmd": "wtype -M ctrl -k w -m ctrl"},
+    
+    # Window Management
+    {"category": "Window", "id": "win_close", "label": "Close Window", "cmd": "hyprctl dispatch killactive"},
+    {"category": "Window", "id": "win_fullscreen", "label": "Toggle Fullscreen", "cmd": "hyprctl dispatch fullscreen 0"},
+    {"category": "Window", "id": "win_float", "label": "Toggle Floating", "cmd": "hyprctl dispatch togglefloating"},
+    {"category": "Window", "id": "win_pin", "label": "Pin Window (All Workspaces)", "cmd": "hyprctl dispatch pin"},
+    
+    # Workspaces
+    {"category": "Workspace", "id": "ws_next", "label": "Next Workspace", "cmd": "hyprctl dispatch workspace m+1"},
+    {"category": "Workspace", "id": "ws_prev", "label": "Previous Workspace", "cmd": "hyprctl dispatch workspace m-1"},
+    
+    # Media & Sound
+    {"category": "Media", "id": "media_play_pause", "label": "Play / Pause", "cmd": "playerctl play-pause"},
+    {"category": "Media", "id": "media_next", "label": "Next Track", "cmd": "playerctl next"},
+    {"category": "Media", "id": "media_prev", "label": "Previous Track", "cmd": "playerctl previous"},
+    {"category": "Media", "id": "vol_up", "label": "Volume Up (+5%)", "cmd": "wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ 5%+"},
+    {"category": "Media", "id": "vol_down", "label": "Volume Down (-5%)", "cmd": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"},
+    {"category": "Media", "id": "vol_mute", "label": "Mute / Unmute", "cmd": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"},
+    
+    # Omarchy System
+    {"category": "System", "id": "sys_screenshot", "label": "Screenshot", "cmd": "omarchy-capture-screenshot"},
+    {"category": "System", "id": "sys_terminal", "label": "Open Terminal", "cmd": "omarchy launch terminal"},
+    {"category": "System", "id": "sys_menu", "label": "Omarchy Menu", "cmd": "omarchy-menu toggle root"},
+    {"category": "System", "id": "sys_emojis", "label": "Emoji Picker", "cmd": "omarchy-shell shell toggle omarchy.emojis"}
+]
+
+def format_device_name(raw_name: str) -> str:
+    cleaned = raw_name.replace("-", " ").replace("_", " ")
+    cleaned = re.sub(r'\b(2\.4g|2\.4|usb)\b', '2.4G', cleaned, flags=re.IGNORECASE)
+    parts = [w.capitalize() if w != '2.4G' else '2.4G' for w in cleaned.split()]
+    return " ".join(parts)
+
+def load_config() -> dict:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except Exception:
+            pass
+    return {
+        "version": 1,
+        "activeDevice": "",
+        "cursorSize": 24,
+        "devices": {}
+    }
+
+def save_config(cfg: dict):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = CONFIG_FILE.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(cfg, indent=2))
+    tmp_path.replace(CONFIG_FILE)
+
+def run_cmd(args, timeout=5) -> str:
+    try:
+        res = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return res.stdout.strip()
+    except Exception:
+        return ""
+
+def hypr_eval(lua_code: str) -> bool:
+    try:
+        res = subprocess.run(["hyprctl", "repl", lua_code], capture_output=True, text=True, timeout=3)
+        return "ok" in res.stdout or "true" in res.stdout
+    except Exception:
+        return False
+
+def is_real_mouse_device(name: str) -> bool:
+    low = name.lower()
+    # Filter out virtual consumer-control and media key endpoints
+    if any(k in low for k in ["consumer", "system-control", "keyboard"]):
+        return False
+    # Filter out secondary non-mouse endpoints on multi-interface dongles (e.g. 2.4g-wireless-receiver-3)
+    if low.endswith("-3") and "mouse" not in low:
+        return False
+    return True
+
+def get_connected_mice() -> list:
+    out = run_cmd(["hyprctl", "devices", "-j"])
+    mice = []
+    if out:
+        try:
+            data = json.loads(out)
+            for m in data.get("mice", []):
+                name = m.get("name", "")
+                if not name or not is_real_mouse_device(name):
+                    continue
+                clean_name = format_device_name(name)
+                # Clean up trailing numbers like "-1" if purely an interface index
+                clean_name = re.sub(r'\s+1$', '', clean_name)
+                mice.append({
+                    "name": name,
+                    "displayName": clean_name,
+                    "address": m.get("address", ""),
+                    "defaultSpeed": m.get("defaultSpeed", 0.0),
+                    "scrollFactor": m.get("scrollFactor", 1.0)
+                })
+        except Exception:
+            pass
+    # Sort so mice with 'mouse' in the name come first
+    mice.sort(key=lambda x: ("mouse" not in x["name"].lower(), x["displayName"]))
+    return mice
+
+def get_current_cursor_size() -> int:
+    val = run_cmd(["gsettings", "get", "org.gnome.desktop.interface", "cursor-size"])
+    if val:
+        try:
+            return int(val.strip().strip("'"))
+        except ValueError:
+            pass
+    if LOOKNFEEL_LUA.exists():
+        try:
+            content = LOOKNFEEL_LUA.read_text()
+            m = re.search(r'hl\.env\("XCURSOR_SIZE",\s*"(\d+)"\)', content)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
+    return 24
+
+def write_bindings_lua(cfg: dict):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    active = cfg.get("activeDevice", "")
+    dev_cfg = cfg.get("devices", {}).get(active, {})
+    bindings = dev_cfg.get("bindings", {})
+    
+    lines = [
+        "-- Generated by OmaMouze. Do not edit by hand.",
+        f"-- Device: {active}",
+        ""
+    ]
+    
+    for btn_id, b in bindings.items():
+        cmd = b.get("cmd", "")
+        label = b.get("label", f"Button {btn_id}")
+        if cmd:
+            safe_label = label.replace('"', '\\"')
+            safe_cmd = cmd.replace('\\', '\\\\').replace('"', '\\"')
+            lines.append(f'-- Button {btn_id}: {label}')
+            lines.append(f'pcall(function()')
+            lines.append(f'  o.bind("mouse:{btn_id}", "OmaMouze: {safe_label}", "{safe_cmd}")')
+            lines.append(f'end)')
+            lines.append('')
+            
+    BINDINGS_LUA.write_text("\n".join(lines))
+    run_cmd(["hyprctl", "reload", "config-only"])
+
+def get_full_state() -> dict:
+    cfg = load_config()
+    mice = get_connected_mice()
+    
+    # Pick active device only if never set. If the configured device is
+    # temporarily disconnected (sleeping wireless mouse), keep its config
+    # so the user doesn't lose their selection.
+    active = cfg.get("activeDevice", "")
+    valid_names = [m["name"] for m in mice]
+    if not active and mice:
+        active = mice[0]["name"]
+        cfg["activeDevice"] = active
+        save_config(cfg)
+        
+    dev_map = cfg.setdefault("devices", {})
+    for m in mice:
+        name = m["name"]
+        if name not in dev_map:
+            dev_map[name] = {
+                "name": name,
+                "displayName": m["displayName"],
+                "baseDpi": 1200,
+                "sensitivity": 0.0,
+                "accelProfile": "flat",
+                "scrollFactor": 1.0,
+                "scrollLines": 3,
+                "bindings": {
+                    "275": {"id": "nav_back", "label": "Browser Back", "cmd": "wtype -M alt -k Left -m alt"},
+                    "276": {"id": "nav_fwd", "label": "Browser Forward", "cmd": "wtype -M alt -k Right -m alt"}
+                }
+            }
+            
+    cursor_size = cfg.get("cursorSize", get_current_cursor_size())
+    cfg["cursorSize"] = cursor_size
+    save_config(cfg)
+    
+    active_cfg = dev_map.get(active, {})
+    
+    return {
+        "mice": mice,
+        "activeDevice": active,
+        "activeConfig": active_cfg,
+        "cursorSize": cursor_size,
+        "presetActions": PRESET_ACTIONS
+    }
+
+def set_device(device_name: str) -> dict:
+    cfg = load_config()
+    cfg["activeDevice"] = device_name
+    save_config(cfg)
+    apply_device_settings(device_name, cfg)
+    write_bindings_lua(cfg)
+    return get_full_state()
+
+def apply_device_settings(dev_name: str, cfg: dict):
+    dev_cfg = cfg.get("devices", {}).get(dev_name, {})
+    if not dev_cfg:
+        return
+    sens = float(dev_cfg.get("sensitivity", 0.0))
+    scroll = float(dev_cfg.get("scrollFactor", 1.0))
+    accel = dev_cfg.get("accelProfile", "flat")
+    
+    lua = f'return hl.device({{ name = "{dev_name}", sensitivity = {sens}, scroll_factor = {scroll}, accel_profile = "{accel}" }})'
+    hypr_eval(lua)
+
+def set_dpi(sens_val: float, accel_profile: str = "flat", base_dpi: int = None) -> dict:
+    cfg = load_config()
+    active = cfg.get("activeDevice", "")
+    dev_cfg = cfg.setdefault("devices", {}).setdefault(active, {})
+    dev_cfg["sensitivity"] = round(float(sens_val), 2)
+    if accel_profile:
+        dev_cfg["accelProfile"] = accel_profile
+    if base_dpi is not None:
+        dev_cfg["baseDpi"] = int(base_dpi)
+    save_config(cfg)
+    apply_device_settings(active, cfg)
+    return get_full_state()
+
+def set_scroll(scroll_val: float) -> dict:
+    cfg = load_config()
+    active = cfg.get("activeDevice", "")
+    dev_cfg = cfg.setdefault("devices", {}).setdefault(active, {})
+    scroll_factor = round(float(scroll_val), 2)
+    dev_cfg["scrollFactor"] = scroll_factor
+    dev_cfg["scrollLines"] = int(round(scroll_factor * 3))
+    save_config(cfg)
+    apply_device_settings(active, cfg)
+    return get_full_state()
+
+def set_cursor_size(size: int) -> dict:
+    cfg = load_config()
+    cfg["cursorSize"] = int(size)
+    save_config(cfg)
+    
+    # Apply immediately — use the current cursor theme name
+    theme = run_cmd(["gsettings", "get", "org.gnome.desktop.interface", "cursor-theme"]).strip("'\"") or "default"
+    run_cmd(["hyprctl", "setcursor", theme, str(size)])
+    run_cmd(["gsettings", "set", "org.gnome.desktop.interface", "cursor-size", str(size)])
+    
+    # Persist in looknfeel.lua
+    if LOOKNFEEL_LUA.exists():
+        try:
+            content = LOOKNFEEL_LUA.read_text()
+            c1 = re.sub(r'hl\.env\("XCURSOR_SIZE",\s*"\d+"\)', f'hl.env("XCURSOR_SIZE", "{size}")', content)
+            c2 = re.sub(r'hl\.env\("HYPRCURSOR_SIZE",\s*"\d+"\)', f'hl.env("HYPRCURSOR_SIZE", "{size}")', c1)
+            LOOKNFEEL_LUA.write_text(c2)
+        except Exception:
+            pass
+            
+    return get_full_state()
+
+def set_binding(button_id: str, label: str, cmd: str, action_id: str = "") -> dict:
+    cfg = load_config()
+    active = cfg.get("activeDevice", "")
+    dev_cfg = cfg.setdefault("devices", {}).setdefault(active, {})
+    bindings = dev_cfg.setdefault("bindings", {})
+    bindings[str(button_id)] = {
+        "id": action_id or f"custom_{button_id}",
+        "label": label,
+        "cmd": cmd
+    }
+    save_config(cfg)
+    write_bindings_lua(cfg)
+    return get_full_state()
+
+def clear_binding(button_id: str) -> dict:
+    cfg = load_config()
+    active = cfg.get("activeDevice", "")
+    dev_cfg = cfg.setdefault("devices", {}).setdefault(active, {})
+    bindings = dev_cfg.setdefault("bindings", {})
+    if str(button_id) in bindings:
+        del bindings[str(button_id)]
+    save_config(cfg)
+    write_bindings_lua(cfg)
+    # Explicitly unbind from Hyprland's runtime — config reload alone
+    # doesn't remove bindings that were previously loaded.
+    hypr_eval(f'pcall(function() hl.unbind("", "mouse:{button_id}") end)')
+    return get_full_state()
+
+def apply_all():
+    cfg = load_config()
+    active = cfg.get("activeDevice", "")
+    if active:
+        apply_device_settings(active, cfg)
+    cursor_size = cfg.get("cursorSize", 24)
+    theme = run_cmd(["gsettings", "get", "org.gnome.desktop.interface", "cursor-theme"]).strip("'\"") or "default"
+    run_cmd(["hyprctl", "setcursor", theme, str(cursor_size)])
+    write_bindings_lua(cfg)
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] == "get-state":
+        print(json.dumps(get_full_state()))
+        return
+        
+    cmd = sys.argv[1]
+    if cmd == "set-device" and len(sys.argv) >= 3:
+        print(json.dumps(set_device(sys.argv[2])))
+    elif cmd == "set-dpi" and len(sys.argv) >= 3:
+        sens = float(sys.argv[2])
+        accel = sys.argv[3] if len(sys.argv) >= 4 else "flat"
+        base = int(sys.argv[4]) if len(sys.argv) >= 5 else None
+        print(json.dumps(set_dpi(sens, accel, base)))
+    elif cmd == "set-scroll" and len(sys.argv) >= 3:
+        print(json.dumps(set_scroll(float(sys.argv[2]))))
+    elif cmd == "set-cursor" and len(sys.argv) >= 3:
+        print(json.dumps(set_cursor_size(int(sys.argv[2]))))
+    elif cmd == "set-binding" and len(sys.argv) >= 5:
+        btn = sys.argv[2]
+        label = sys.argv[3]
+        command = sys.argv[4]
+        aid = sys.argv[5] if len(sys.argv) >= 6 else ""
+        print(json.dumps(set_binding(btn, label, command, aid)))
+    elif cmd == "clear-binding" and len(sys.argv) >= 3:
+        print(json.dumps(clear_binding(sys.argv[2])))
+    elif cmd == "apply-all":
+        apply_all()
+        print(json.dumps(get_full_state()))
+    else:
+        print(f"Unknown command: {cmd}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

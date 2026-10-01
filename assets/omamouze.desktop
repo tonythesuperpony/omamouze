@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=OmaMouze
+Comment=Mouse controls, DPI, buttons, cursor size, and scroll speed
+Exec=omamouze toggle
+Icon=input-mouse
+Terminal=false
+Categories=Settings;HardwareSettings;

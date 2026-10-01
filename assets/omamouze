@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# OmaMouze launcher / CLI helper
+if [[ $# -eq 0 || "$1" == "panel" || "$1" == "toggle" ]]; then
+  omarchy-shell omamouze toggle
+else
+  exec "$HOME/.config/omarchy/plugins/omamouze/bin/omamouze-ctl" "$@"
+fi
