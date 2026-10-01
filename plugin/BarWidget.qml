@@ -317,6 +317,13 @@ Panel {
                 onReleased: function(v) {
                   root.runCtl(["set-dpi", v, root.accelProfile, root.baseDpi])
                 }
+                
+                // Block wheel events from changing the slider so the Flickable can scroll
+                MouseArea {
+                  anchors.fill: parent
+                  acceptedButtons: Qt.NoButton
+                  onWheel: function(wheel) { wheel.accepted = false }
+                }
               }
 
               // Acceleration profile and Quick Presets
@@ -396,6 +403,13 @@ Panel {
                   value: root.scrollFactor
                   onReleased: function(v) {
                     root.runCtl(["set-scroll", v])
+                  }
+                  
+                  // Block wheel events from changing the slider so the Flickable can scroll
+                  MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.NoButton
+                    onWheel: function(wheel) { wheel.accepted = false }
                   }
                 }
               }
