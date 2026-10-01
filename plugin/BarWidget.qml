@@ -296,26 +296,30 @@ Panel {
                     model: [400, 800, 1200, 1600, 2400, 3200]
                     delegate: Button {
                       text: String(modelData)
-                      selected: root.baseDpi === modelData
+                      // Only highlight if this is the base AND we haven't custom-tuned away from it
+                      selected: root.baseDpi === modelData && Math.abs(root.sensitivity) < 0.01
                       bordered: true
                       onClicked: {
-                        root.runCtl(["set-dpi", root.sensitivity, root.accelProfile, modelData])
+                        // Reset sensitivity to 0 so the slider centers on this exact DPI
+                        root.runCtl(["set-dpi", 0.0, root.accelProfile, modelData])
                       }
                     }
                   }
                 }
               }
 
-              // Sensitivity Slider
+              // DPI Slider
               PanelSlider {
                 width: parent.width
                 bar: root.bar
-                minimum: -0.90
-                maximum: 1.00
-                step: 0.05
-                value: root.sensitivity
+                minimum: root.baseDpi * 0.1
+                maximum: root.baseDpi * 2.0
+                step: root.baseDpi * 0.05
+                value: Math.round(root.baseDpi * (1.0 + root.sensitivity))
                 onReleased: function(v) {
-                  root.runCtl(["set-dpi", v, root.accelProfile, root.baseDpi])
+                  // Calculate back to Hyprland's sensitivity (-1.0 to 1.0)
+                  var newSens = (v / root.baseDpi) - 1.0
+                  root.runCtl(["set-dpi", newSens, root.accelProfile, root.baseDpi])
                 }
                 
                 // Block wheel events from changing the slider so the Flickable can scroll
